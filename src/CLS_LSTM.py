@@ -5,27 +5,13 @@ import pandas as pd
 import torch.nn as nn
 import torch
 from datetime import timedelta
-from utils import concatenate_title_and_description, sample_data, preprocess
+from src.utils import concatenate_title_and_description, sample_data, preprocess
 import torchtext
 from torch.utils.data import Dataset, DataLoader
 from torch import optim
 import matplotlib.pyplot as plt
+from nltk.tokenize import word_tokenize
 from tqdm import tqdm
-
-
-# class LSTMClassifier(nn.Module):
-#     def __init__(self, vocab_size, embedding_dim, hidden_dim, num_layers):
-#         super(LSTMClassifier, self).__init__()
-#         self.num_layers = num_layers
-#         self.embedding_layer = nn.Embedding(num_embeddings=vocab_size, embedding_dim=embedding_dim)
-#         self.lstm = nn.LSTM(input_size=embedding_dim, hidden_size=hidden_dim, num_layers=num_layers, batch_first=True)
-#         self.linear = nn.Linear(hidden_dim, 4)
-#
-#     def forward(self, X_batch):
-#         embeddings = self.embedding_layer(X_batch)
-#         hidden, carry = torch.randn(self.num_layers, len(X_batch), hidden_dim), torch.randn(self.num_layers, len(X_batch), hidden_dim)
-#         output, (hidden, carry) = self.lstm(embeddings, (hidden, carry))
-#         return self.linear(output[:, -1])
 
 
 class LSTM(nn.Module):
@@ -48,7 +34,6 @@ class LSTM(nn.Module):
 
     def forward(self, X_batch):
         embeddings = self.embedding(X_batch)
-        # hidden, carry = torch.randn(self.num_layers, len(X_batch), hidden_dim), torch.randn(self.num_layers, len(X_batch), hidden_dim)
         lstm_output, (h_n, c_n) = self.lstm(embeddings)
         output = self.linear(lstm_output[:, -1, :])
         return output
@@ -142,7 +127,82 @@ def check_distribution(train_data):
     """
     Check the distribution of sequence length before and after preprocessing.
     """
+    text_ = concatenate_title_and_description(train_data)['text'].values
+    length_before_preprocessing = [len(word_tokenize(text)) for text in text_]
+    length_after_preprocessing = [len(word_tokenize(preprocess(text))) for text in text_]
 
+    plt.figure(figsize=(6, 4))
+    plt.subplot(211)
+    plt.hist(length_before_preprocessing, bins=80, label="Before preprocessing")
+    plt.legend()
+    plt.xlim(0, 100)
+    plt.ylabel("Count")
+    plt.subplot(212)
+    plt.hist(length_after_preprocessing, bins=40, label="After preprocessing")
+    plt.legend()
+    plt.xlim(0, 100)
+    plt.xlabel("Length of sequence", fontsize=10, color="black")
+    plt.ylabel("Count")
+    plt.savefig('./output/distribution_before_and_after_preprocessing.png')
+    plt.close()
+
+
+def tune_hyper_max_len(tokenizer):
+    max_len_dict = {False: [30, 35, 40, 45, 50], True: [10, 15, 20, 25, 30]}
+    test_acc = {True: [], False: []}
+    for prep in [False, True]:
+        for i, max_len in enumerate(max_len_dict[prep]):
+            use_pretrained_embedding = False
+            tune_pretrained_embedding = False
+            if use_pretrained_embedding:  # Train embedding from zero
+                word_to_idx, idx_to_word, embedding_value = load_pretrained_embedding()
+                model = LSTM(len(word_to_idx), embedding_dim, hidden_dim, num_layers,
+                             pretrained_embedding=embedding_value,
+                             fine_tune_embedding=tune_pretrained_embedding)
+            else:
+                vocab = torchtext.vocab.build_vocab_from_iterator(map(tokenizer, train_data2['text']), min_freq=1,
+                                                                  specials=['<pad>', '<unk>'])
+                vocab.set_default_index(vocab['<unk>'])
+                word_to_idx = vocab.get_stoi()
+                idx_to_word = vocab.get_itos()
+                model = LSTM(len(word_to_idx), embedding_dim, hidden_dim, num_layers)
+
+            # Generate train_loader and test_loader
+            train_loader = get_data_loader(train_data2, word_to_idx, max_len=max_len, prep=prep, batch_size=batch_size)
+            test_loader = get_data_loader(test_data2, word_to_idx, max_len=max_len, prep=prep, batch_size=batch_size)
+
+            loss_fn = nn.CrossEntropyLoss()
+            optimizer = optim.Adam(model.parameters(), lr=0.01)
+
+            total_train_time = 0
+            total_evaluate_time = 0
+
+            # Start training...
+            test_acc[prep].append([])
+            for epoch in range(num_epochs):
+                model, train_time = train(model, train_loader, loss_fn, optimizer)
+                acc, evaluate_time = evaluate(model, test_loader)
+
+                total_train_time += train_time
+                total_evaluate_time += evaluate_time
+
+                test_acc[prep][i].append(float(acc))
+
+                print(f"With preprocessing: {prep}\t|\tmax_len: {max_len}\t|\tEpoch: {epoch}\t|\t"
+                      f"Test Accuracy: {acc * 100:.0f}%\t|\t"
+                      f"TrainTime: {timedelta(seconds=int(total_train_time))}\t|\t"
+                      f"EvaluateTime: {timedelta(seconds=int(total_evaluate_time))}")
+
+    fig, axs = plt.subplots(nrows=2, ncols=1, figsize=(8, 8))
+    pd.DataFrame(test_acc[False], index=pd.Series(max_len_dict[False], name='max_len without preprocessing')).transpose().plot(ax=axs[0])
+    axs[0].set_xticks(range(num_epochs))
+    axs[0].set_ylabel("Test Accuracy")
+    pd.DataFrame(test_acc[True], index=pd.Series(max_len_dict[True], name='max_len with preprocessing')).transpose().plot(ax=axs[1])
+    axs[1].set_xticks(range(num_epochs))
+    axs[1].set_ylabel("Test Accuracy")
+    axs[1].set_xlabel("Epoch")
+    plt.savefig('output/tune_hyper_max_len.png')
+    plt.close()
 
 
 def compare_preprocessing():
@@ -163,8 +223,8 @@ def compare_preprocessing():
             model = LSTM(len(word_to_idx), embedding_dim, hidden_dim, num_layers)
 
         # Generate train_loader and test_loader
-        train_loader = get_data_loader(train_data2, word_to_idx, max_len=60 - prep * 25, prep=prep, batch_size=batch_size)
-        test_loader = get_data_loader(test_data2, word_to_idx, max_len=60 - prep * 25, prep=prep, batch_size=batch_size)
+        train_loader = get_data_loader(train_data2, word_to_idx, max_len=35 - prep * 20, prep=prep, batch_size=batch_size)
+        test_loader = get_data_loader(test_data2, word_to_idx, max_len=35 - prep * 20, prep=prep, batch_size=batch_size)
 
         loss_fn = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=0.01)
@@ -192,7 +252,7 @@ def compare_preprocessing():
     plt.legend()
     plt.xlabel('Epoch')
     plt.ylabel('Test Accuracy')
-    plt.savefig('./preprocessing_effect.png')
+    plt.savefig('./output/preprocessing_effect.png')
     plt.close()
     return test_acc
 
@@ -265,11 +325,11 @@ if __name__ == '__main__':
     embedding_dim = 50
     hidden_dim = 64
     num_layers = 2
-    num_epochs = 100
+    num_epochs = 30
     batch_size = 1024
 
-    # compare_preprocessing()
-    compare_embedding()
-
+    compare_preprocessing()
+    # compare_embedding()
+    # tune_hyper_max_len(tokenizer)
 
 

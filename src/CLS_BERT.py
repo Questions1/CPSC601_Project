@@ -1,4 +1,4 @@
-
+import matplotlib.pyplot as plt
 import torch
 import time
 from datetime import timedelta
@@ -8,11 +8,38 @@ import transformers
 from transformers import BertTokenizer, BertModel
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
-from utils import preprocess, concatenate_title_and_description, sample_data
+from src.utils import preprocess, concatenate_title_and_description, sample_data
 from torch import nn
-from CLS_LSTM import TextData, evaluate
+from src.CLS_LSTM import TextData, evaluate
 from torch.utils.data import DataLoader
 from torch import optim
+
+
+def extract_feature2(preprocess_bool: bool):
+    if preprocess_bool:
+        train_loader = DataLoader(TextData(train_data2['text'].apply(preprocess), train_data2['label'] - 1), batch_size=64, shuffle=True)
+        test_loader = DataLoader(TextData(test_data2['text'].apply(preprocess), test_data2['label'] - 1), batch_size=64, shuffle=False)
+    else:
+        train_loader = DataLoader(TextData(train_data2['text'], train_data2['label'] - 1), batch_size=64, shuffle=True)
+        test_loader = DataLoader(TextData(test_data2['text'], test_data2['label'] - 1), batch_size=64, shuffle=False)
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', bos_token="[CLS]", eos_token="[SEP]")
+    model = BertModel.from_pretrained("bert-base-uncased").to(device)
+
+    def extract(data_loader):
+        features = []
+        start_time = time.time()
+        for batch_data_train, batch_label_train in data_loader:
+            encoded_input = tokenizer(batch_data_train, max_length=60, padding='max_length', truncation=True,
+                                      return_tensors='pt')
+            batch_outputs = model(**encoded_input.to(device))['pooler_output']
+            features.append(batch_outputs)
+        end_time = time.time()
+        result, time_consumption = torch.concat(features, dim=0), end_time - start_time
+        return result, time_consumption
+
+    return extract(train_loader), extract(test_loader)
 
 
 class BertClassifier(nn.Module):
@@ -61,14 +88,15 @@ def show_distribution():
     plt.ylabel("Count")
 
 
-def train(tokenizer, model, train_loader, loss_fn, optimizer):
+def train(tokenizer, model, train_loader, loss_fn, optimizer, device):
     """
     Train model on train_loader with 1 global epoch batch by batch.
     """
     start_time = time.time()
     for batch_data_train, batch_label_train in train_loader:
         encoded_input = tokenizer(batch_data_train, max_length=60, padding='max_length', truncation=True, return_tensors='pt')
-        outputs = model(encoded_input)
+        model = model.to(device)
+        outputs = model(encoded_input.to(device))
         loss = loss_fn(outputs, batch_label_train)
         optimizer.zero_grad()
         loss.backward()
@@ -121,6 +149,19 @@ def train_evaluate(epoch_num, freeze_bert):
               f"EvaluateTime: {timedelta(seconds=int(total_evaluate_time))}")
 
 
+def plot_finetune_bert():
+    import matplotlib.pyplot as plt
+    data = pd.read_csv('./input/Bert_Finetune.csv')
+    plt.figure(figsize=(8, 4))
+    data.index = range(1, len(data)+1)
+    plt.plot(data['Accuracy'])
+    plt.xticks(range(1, len(data)+1))
+    plt.xlabel('Epoch')
+    plt.ylabel('Test Accuracy')
+    plt.savefig('./output/finetune_bert.png')
+    plt.close()
+
+
 if __name__ == '__main__':
     TRAIN_PATH = './input/AG_NEWS_kaggle/train.csv'
     TEST_PATH = './input/AG_NEWS_kaggle/test.csv'
@@ -131,11 +172,11 @@ if __name__ == '__main__':
     train_data2 = sample_data(concatenate_title_and_description(train_data), 5000)
     test_data2 = sample_data(concatenate_title_and_description(test_data), 1000)
 
-    train_evaluate(30, freeze_bert=False)
-    train_evaluate(30, freeze_bert=True)
-
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', bos_token="[CLS]", eos_token="[SEP]")
     model = BertModel.from_pretrained("bert-base-uncased")
+
+    train_evaluate(30, freeze_bert=False)
+    train_evaluate(30, freeze_bert=True)
 
     # train_x = []
     # start_time = time.time()
